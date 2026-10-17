@@ -17,28 +17,7 @@ heist fails); the crew wins if the vault is cracked and every mole is cut.
 | `selftest.py` | End-to-end test: real `moderator.py` + 4 scripted players, 3 scenarios. |
 | `COMMS_EXPLAINED.md` | Plain-English walkthrough of the comms design (writeup material). |
 
-## Quickstart (one machine, one user — for development)
-
-Terminal 1:
-```
-python3 moderator.py
-```
-
-Terminals 2–5 (one each):
-```
-python3 player.py --id alice
-python3 player.py --id bob
-python3 player.py --id cara
-python3 player.py --id dan
-```
-
-The moderator starts when 6 players join, or after `--lobby-timeout` (60s)
-once `--min-players` (4) have joined. Faster local games:
-```
-python3 moderator.py --min-players 4 --max-players 4 --planning-time 10 --tick 1 --max-ticks 20
-```
-
-## Realistic test (each player their own Linux user — for screenshots)
+## Realistic test (each player their own Linux user)
 
 ```
 sudo ./setup_users.sh
@@ -95,11 +74,3 @@ Spawns the real `moderator.py`, connects 4 scripted players over a real
 Unix socket, and plays three full games (crew wins / moles win by bad vote /
 moles win by stalled heist), asserting the multicast secrecy rules.
 
-## Submitting
-
-Build the PDF writeup from `WRITEUP_DRAFT.md`, save it here as `writeup.pdf`,
-then run `./package.sh` — it checks that every required file is present and
-builds `neon-heist.tgz` for submission. Manual equivalent:
-`tar czf neon-heist.tgz commlib.py game_state.py moderator.py player.py setup_users.sh README.md selftest.py writeup.pdf`
-See `PDF_OUTLINE.md` and `feedback/` for the writeup checklist, the Canvas
-feedback post draft, and the feedback-giving tracker.
