@@ -285,5 +285,6 @@ class GameServer:
         async def _cb(reader, writer):
             await self._handle_conn(reader, writer, on_message)
         self._server = await asyncio.start_unix_server(_cb, path=sock_path)
+        os.chmod(sock_path, 0o777)
         async with self._server:
             await self._server.serve_forever()
