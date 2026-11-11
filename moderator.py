@@ -24,6 +24,8 @@ import argparse
 import asyncio
 import os
 import sys
+import time
+from collections import deque
 
 import commlib
 from game_state import assign_roles, tally_votes, decide_winner, ROLE_BRIEFS
@@ -37,6 +39,13 @@ WATCH_RELIEF = 8        # alert removed per watch action
 ALERT_MAX = 100         # alert >= this -> heist blown, moles win
 VAULT_TARGET = 100
 
+# Rate limiting: a second isolation layer beside the cgroups caps.
+# Legit play is ~1 frame per tick plus the odd chat, far under 30/s;
+# a flood is hundreds per second. (selftest runs a 0.05s tick, so its
+# bots send ~20 frames/s -- still comfortably under the limit.)
+RATE_LIMIT = 30          # frames per second allowed per player
+RATE_WINDOW = 1.0        # seconds: sliding window for the limit
+RATE_MAX_DROPS = 50      # disconnect a player after this many dropped frames
 
 class Moderator:
     def __init__(self, args):
@@ -51,14 +60,36 @@ class Moderator:
         self.alert = 0
         self.tick = 0
         self.votes = {}
+        # Per-player rate-limit state (see _rate_limited).
+        self._msg_times = {}   # pid -> deque of monotonic timestamps
+        self._dropped = {}     # pid -> frames dropped by the rate limiter
         # GameServer prunes its own registry on disconnect; register the hook
         # so game state (actions, votes) doesn't keep ghosts around.
         self.server.on_leave = self.handle_leave
 
     # -- message handling (runs on per-connection tasks) --------------------
 
+    def _rate_limited(self, pid):
+        """Sliding-window limiter: True if this frame is over the limit
+        (the caller drops it)."""
+        now = time.monotonic()
+        times = self._msg_times.setdefault(pid, deque())
+        while times and times[0] <= now - RATE_WINDOW:
+            times.popleft()
+        if len(times) >= RATE_LIMIT:
+            self._dropped[pid] = self._dropped.get(pid, 0) + 1
+            return True
+        times.append(now)
+        return False
+
     async def on_message(self, server, pid, msg):
         # The server already stamped msg["from"] = pid (authenticated).
+        if self._rate_limited(pid):
+            if self._dropped.get(pid, 0) >= RATE_MAX_DROPS:
+                print(f"[ratelimit] disconnecting {pid} "
+                    f"({self._dropped[pid]} frames dropped)", flush=True)
+                await server.disconnect(pid)
+            return
         if self.phase == "lobby":
             return
         mtype = msg.get("type")
@@ -84,6 +115,8 @@ class Moderator:
         self.actions_this_tick.pop(pid, None)
         self.votes.pop(pid, None)
         self.roles.pop(pid, None)
+        self._msg_times.pop(pid, None)
+        self._dropped.pop(pid, None)
 
     async def handle_chat(self, pid, msg):
         text = str(msg["payload"].get("text", ""))[:500]

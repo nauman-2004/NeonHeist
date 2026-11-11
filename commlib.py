@@ -221,6 +221,19 @@ class GameServer:
                 sent.append(pid)
         return sent
 
+    async def disconnect(self, pid):
+        """Drop one player's connection. The handler task then sees EOF,
+        prunes the registry, and fires on_leave -- the same path as a
+        player quitting on their own. Returns False if nobody by that id."""
+        writer = self._players.get(pid)
+        if writer is None:
+            return False
+        try:
+            writer.close()
+        except Exception:
+            pass
+        return True
+
     # -- accepting ------------------------------------------------------------
     async def _handle_conn(self, reader, writer, on_message):
         pid = None
