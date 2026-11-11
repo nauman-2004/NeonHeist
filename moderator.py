@@ -51,6 +51,9 @@ class Moderator:
         self.alert = 0
         self.tick = 0
         self.votes = {}
+        # GameServer prunes its own registry on disconnect; register the hook
+        # so game state (actions, votes) doesn't keep ghosts around.
+        self.server.on_leave = self.handle_leave
 
     # -- message handling (runs on per-connection tasks) --------------------
 
@@ -61,7 +64,7 @@ class Moderator:
         mtype = msg.get("type")
         if mtype == "chat":
             await self.handle_chat(pid, msg)
-        elif mtype == "action":
+        elif mtype == "action" and self.phase == "execution":
             kind = msg["payload"].get("kind")
             if kind in ("drill", "watch", "lift", "sabotage"):
                 self.actions_this_tick[pid] = kind
@@ -71,6 +74,16 @@ class Moderator:
                 self.votes[pid] = target
                 await server.unicast(pid, "action_result",
                                      {"ok": True, "text": f"Vote recorded for {target}."})
+
+    async def handle_leave(self, pid):
+        # GameServer already removed pid from its registry/groups. Prune the
+        # game-state that was keyed on pid so a ghost can't act or vote.
+        # roles are popped too — a disconnected
+        # player is fully out of the game, no longer alive in the win check
+        # and no longer a valid vote target (votes require target in roles).
+        self.actions_this_tick.pop(pid, None)
+        self.votes.pop(pid, None)
+        self.roles.pop(pid, None)
 
     async def handle_chat(self, pid, msg):
         text = str(msg["payload"].get("text", ""))[:500]
@@ -205,6 +218,7 @@ class Moderator:
         while len(self.votes) < len(players) and waited < self.args.vote_timeout:
             await asyncio.sleep(0.5)
             waited += 0.5
+            players = self.server.player_ids()  # drop anyone who left mid-vote
         eliminated, counts = tally_votes(self.votes)
         winner, reason = decide_winner(self.roles, self.vault, eliminated)
         await self.finish(winner,

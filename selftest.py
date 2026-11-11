@@ -3,12 +3,19 @@
 selftest.py -- end-to-end test of the real moderator.py + commlib.py.
 
 Spawns moderator.py as a subprocess, connects scripted players over the
-real Unix socket, and plays three scripted games:
+real Unix socket, and plays six scripted games:
 
   1. crew_wins : crew drills (one watches to hold the alert down), the mole
                  sabotages twice, then the crew votes the mole out.
   2. moles_win : same, but the crew votes out an innocent -> mole survives.
   3. stall     : nobody acts -> the alert maxes out -> moles win.
+  4. planning_action : a drill sent during planning must NOT fire on
+                 execution tick 1 (Bug 1: action phase gate).
+  5. disconnect_mid_vote : a player leaving mid-vote must not stall
+                 extraction for the full vote timeout (Bug 2).
+  6. mole_disconnects : the mole leaves mid-game, the
+                 crew cracks the vault and votes out an innocent, and the
+                 crew must still win (Bug 3: on_leave ghost removal).
 
 Also asserts the multicast rules during planning:
   * a moles-channel message reaches ONLY moles
@@ -215,6 +222,106 @@ async def vote_and_finish(bots, target):
     over = await bots["p1"].wait_for("game_over", timeout=15)
     return over["payload"]["winner"]
 
+async def play_execution_crew_only(bots, observer):
+    """Drill the vault to 100% with the remaining crew (no mole left).
+    One crew member watches, the rest drill. Returns the message that ended
+    execution: the extraction "phase" or an early "game_over".
+
+    The caller already waited for the execution phase on another bot, so
+    there is no second phase message to wait for here -- the observer's
+    inbox already holds the queued vault_updates."""
+    crew = list(bots.values())
+    watcher, drillers = crew[0], crew[1:]
+    while True:
+        m = await observer.wait_for_any(("vault_update", "phase", "game_over"))
+        if m["type"] == "vault_update":
+            for b in drillers:
+                await b.conn.send("action", {"kind": "drill"})
+            await watcher.conn.send("action", {"kind": "watch"})
+        elif m["type"] == "game_over":
+            return m
+        elif m["payload"].get("name") == "extraction":
+            return m
+        # Any other phase message is stale (planning/execution, already
+        # seen by another bot): ignore it and keep waiting for ticks.
+
+
+async def scenario_planning_action():
+    """Bug 1: an action sent during planning must NOT fire on tick 1."""
+    print("scenario: action sent during planning is ignored")
+    proc, sock, bots = await launch_game()
+    try:
+        # Still in planning (3s window): a drill now must be dropped.
+        await bots["p1"].conn.send("action", {"kind": "drill"})
+        await check_multicast(bots)
+        await bots["p1"].wait_for_phase("execution")
+        # Tick 1 drains whatever was queued. Gated: vault is 0.
+        # Ungated: the planning drill fires -> progress 4 (10 for hacker).
+        m = await bots["p1"].wait_for("vault_update", timeout=15)
+        assert m["payload"]["tick"] == 1, "first vault_update is not tick 1"
+        assert m["payload"]["progress"] == 0, \
+            "planning-phase drill fired on tick 1: progress=%s" % m["payload"]["progress"]
+        print("  [ok] vault is 0% after tick 1")
+    finally:
+        await end_game(proc, bots, sock)
+
+
+async def scenario_disconnect_mid_vote():
+    """Bug 2: a disconnect mid-vote must not stall extraction."""
+    print("scenario: disconnect mid-vote does not stall extraction")
+    proc, sock, bots = await launch_game()
+    try:
+        await check_multicast(bots)
+        end = await play_execution(bots)
+        assert end["type"] == "phase", "expected extraction, got %s" % end["type"]
+        await bots["p1"].wait_for("vote_request", timeout=15)
+        # One player leaves before voting; the rest vote the mole out
+        # (or an innocent, if the leaver was the mole -- either way the
+        # crew must win: the vault is at 100% and no mole remains).
+        leaver = bots["p4"]
+        await leaver.close()
+        del bots["p4"]
+        moles = [b for b in bots.values() if b.role == "mole"]
+        target = moles[0].pid if moles else bots["p1"].pid
+        t0 = time.monotonic()
+        for b in bots.values():
+            await b.conn.send("vote", {"target": target})
+        over = await bots["p1"].wait_for("game_over", timeout=15)
+        elapsed = time.monotonic() - t0
+        # vote-timeout is 5s: without the roster refresh this takes the full
+        # 5s; with it, extraction ends ~0.5s after the last vote.
+        assert elapsed < 3.0, "extraction stalled %.1fs after disconnect" % elapsed
+        assert over["payload"]["winner"] == "crew", \
+            "expected crew win, got %s" % over["payload"]["winner"]
+        print("  [ok] game_over in %.1fs after disconnect; winner = crew" % elapsed)
+    finally:
+        await end_game(proc, bots, sock)
+
+
+async def scenario_mole_disconnects():
+    """Bug 3: the mole leaves mid-game, the crew cracks
+    the vault and votes out an innocent -> the crew must still win."""
+    print("scenario: mole disconnects mid-game")
+    proc, sock, bots = await launch_game()
+    try:
+        await check_multicast(bots)
+        await bots["p1"].wait_for_phase("execution")
+        mole = next(b for b in bots.values() if b.role == "mole")
+        await mole.close()
+        del bots[mole.pid]
+        observer = next(iter(bots.values()))
+        end = await play_execution_crew_only(bots, observer)
+        assert end["type"] == "phase", "expected extraction, got %s" % end["type"]
+        await observer.wait_for("vote_request", timeout=15)
+        target = observer.pid
+        for b in bots.values():
+            await b.conn.send("vote", {"target": target})
+        over = await observer.wait_for("game_over", timeout=15)
+        assert over["payload"]["winner"] == "crew", \
+            "expected crew win, got %s" % over["payload"]["winner"]
+        print("  [ok] winner = crew (ghost mole did not steal the win)")
+    finally:
+        await end_game(proc, bots, sock)
 
 async def scenario(name, vote_target=None, sabotage_rounds=2, stall=False):
     print("scenario: %s" % name)
@@ -251,6 +358,10 @@ async def main():
 
     w3 = await scenario("stall: nobody acts", stall=True)
     assert w3 == "moles", "expected moles win on stall, got %s" % w3
+
+    await scenario_planning_action()
+    await scenario_disconnect_mid_vote()
+    await scenario_mole_disconnects()
 
     print("\nALL SELFTESTS PASSED")
 
