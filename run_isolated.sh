@@ -26,15 +26,27 @@ check() {
         || die "not cgroup v2 (got $fstype) -- need Ubuntu 22.04+ with systemd"
     # 2. can systemd actually run a scoped unit with a quota?
     #    (In a container this silently does nothing, so verify, don't assume.)
-    systemd-run --scope --unit=heist-check --property=CPUQuota=10% sleep 5 >/dev/null
+    # NOTE: systemd-run --scope stays in the foreground until its command
+    # exits, so run it in the background and check while the sleep is
+    # still running -- otherwise the scope is already done when we look.
+    systemd-run --scope --unit=heist-check --property=CPUQuota=10% sleep 30 >/dev/null &
+    check_pid=$!
     sleep 1
     state=$(systemctl show heist-check.scope -p ActiveState --value)
-    quota=$(systemctl show heist-check.scope -p CPUQuotaPerSecUSec --value)
+    # Read the limit from the cgroup itself -- the ground truth. (systemctl
+    # prints CPUQuotaPerSecUSec as a timespan like "100ms", and 10% is
+    # 100000 us/s, not 10000, so comparing its output is fragile.)
+    cpu_max=$(cat /sys/fs/cgroup/system.slice/heist-check.scope/cpu.max 2>/dev/null || echo "?")
     systemctl stop heist-check.scope >/dev/null 2>&1 || true
+    wait "$check_pid" 2>/dev/null || true
     [ "$state" = "active" ] \
-        || die "smoke scope is '$state', not active -- systemd-run scopes do not work here"
-    [ "$quota" = "10000" ] \
-        || die "smoke scope quota is '$quota', expected 10000 (10% of one CPU)"
+	|| die "smoke scope is '$state', not active -- systemd-run scopes do not work here"
+    # cpu.max is "MAX PERIOD" in microseconds; systemd uses a 100ms period,
+    # so 10% reads "10000 100000", not "100000 1000000" -- the ratio is
+    # what matters: MAX*10 must equal PERIOD.
+    echo "$cpu_max" | awk '{ if ($1 == "max" || $2 == 0 || $1 * 10 != $2) exit 1 }' \
+	|| die "smoke scope cpu.max is '$cpu_max', expected a 10% quota (MAX*10 == PERIOD)"
+
     echo "check ok: cgroup v2, systemd-run scopes work, CPUQuota applies"
 }
 
