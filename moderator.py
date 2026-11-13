@@ -96,10 +96,14 @@ class Moderator:
         if mtype == "chat":
             await self.handle_chat(pid, msg)
         elif mtype == "action" and self.phase == "execution":
+            if pid not in self.roles:
+                return  # no role (late joiner): ignore, they cannot act
             kind = msg["payload"].get("kind")
             if kind in ("drill", "watch", "lift", "sabotage"):
                 self.actions_this_tick[pid] = kind
         elif mtype == "vote" and self.phase == "extraction":
+            if pid not in self.roles:
+                return  # no role (late joiner): ignore, they cannot vote
             target = msg["payload"].get("target")
             if pid not in self.votes and target in self.roles:
                 self.votes[pid] = target
@@ -114,6 +118,9 @@ class Moderator:
         # and no longer a valid vote target (votes require target in roles).
         self.actions_this_tick.pop(pid, None)
         self.votes.pop(pid, None)
+        # Refund votes cast on the departed player: they should not count
+        # toward eliminating someone who already left.
+        self.votes = {v: t for v, t in self.votes.items() if t != pid}
         self.roles.pop(pid, None)
         self._msg_times.pop(pid, None)
         self._dropped.pop(pid, None)
@@ -240,7 +247,10 @@ class Moderator:
     async def extraction(self):
         self.phase = "extraction"
         self.votes = {}
-        players = self.server.player_ids()
+        # Only players who were dealt a role can vote. A late joiner
+        # (connected after roles were dealt) has no role, so they must
+        # not count toward the vote total or stall the wait.
+        players = [pid for pid in self.server.player_ids() if pid in self.roles]
         await self.server.broadcast(
             "phase", {"name": "extraction",
                       "text": "Vault cracked. One of you is cut before the getaway. "
@@ -251,7 +261,7 @@ class Moderator:
         while len(self.votes) < len(players) and waited < self.args.vote_timeout:
             await asyncio.sleep(0.5)
             waited += 0.5
-            players = self.server.player_ids()  # drop anyone who left mid-vote
+            players = [pid for pid in self.server.player_ids() if pid in self.roles]
         eliminated, counts = tally_votes(self.votes)
         winner, reason = decide_winner(self.roles, self.vault, eliminated)
         await self.finish(winner,
