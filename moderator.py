@@ -272,6 +272,12 @@ class Moderator:
         serve_task = asyncio.create_task(
             self.server.serve(self.args.sock, self.on_message))
         await asyncio.sleep(0.2)  # let the socket come up
+        if serve_task.done() and serve_task.exception() is not None:
+            # serve() failed (e.g. the socket directory was missing).
+            # Fail loudly instead of sitting in a lobby no one can join.
+            print(f"[error] could not start server on {self.args.sock}: "
+                f"{serve_task.exception()}", flush=True)
+            return
         try:
             players = await self.lobby()
             if len(players) < self.args.min_players:

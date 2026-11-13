@@ -291,6 +291,20 @@ class GameServer:
 
     async def serve(self, sock_path, on_message):
         """Listen forever. Cancel the task to shut down."""
+        # The socket lives in /tmp, which is wiped on reboot. If the
+        # directory is gone, bind fails with FileNotFoundError and no
+        # player can connect. Recreate it here with the game group's
+        # permissions, so a fresh boot doesn't break the game. This is
+        # a no-op when setup_users.sh already created it correctly.
+        sock_dir = os.path.dirname(sock_path)
+        if sock_dir:
+            os.makedirs(sock_dir, exist_ok=True)
+            try:
+                import grp
+                os.chgrp(sock_dir, grp.getgrnam("heist").gr_gid)
+                os.chmod(sock_dir, 0o2770)
+            except Exception:
+                pass  # best effort: a plain dir still lets players connect
         try:
             os.unlink(sock_path)   # stale socket from a previous run
         except FileNotFoundError:
