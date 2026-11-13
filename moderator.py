@@ -85,7 +85,7 @@ class Moderator:
     async def on_message(self, server, pid, msg):
         # The server already stamped msg["from"] = pid (authenticated).
         if self._rate_limited(pid):
-            if self._dropped.get(pid, 0) >= RATE_MAX_DROPS:
+            if self._dropped.get(pid, 0) == RATE_MAX_DROPS:
                 print(f"[ratelimit] disconnecting {pid} "
                     f"({self._dropped[pid]} frames dropped)", flush=True)
                 await server.disconnect(pid)
